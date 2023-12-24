@@ -110,7 +110,55 @@ print(np.round(eigenvalues, 2))
 print("\nEigenvectors:")
 print(np.round(eigenvectors, 2))
 
+#%%
+import matplotlib.pyplot as plt
+import numpy as np
 
+def monte_carlo_simulation(transition_matrix, num_steps):
+    num_states = len(transition_matrix)
+
+    # Initialize system at a random state
+    current_state = np.random.choice(np.arange(num_states))
+
+    # Store the states during the simulation
+    states_history = [current_state]
+
+    # Monte Carlo simulation
+    for step in range(num_steps):
+        # Choose a new state based on the transition probabilities
+        new_state = np.random.choice(np.arange(num_states), p=transition_matrix[current_state])
+
+        # Update the current state
+        current_state = new_state
+
+        # Store the state in history
+        states_history.append(current_state)
+
+    return states_history
+
+# Given transition matrix
+P = np.array([[0.84, 0.15, 0.  , 0.01, 0.  , 0.  , 0.  , 0.  , 0.  ],
+              [0.02, 0.79, 0.14, 0.02, 0.01, 0.01, 0.  , 0.  , 0.  ],
+              [0.  , 0.13, 0.62, 0.16, 0.02, 0.05, 0.03, 0.  , 0.  ],
+              [0.  , 0.01, 0.13, 0.69, 0.16, 0.01, 0.01, 0.  , 0.  ],
+              [0.  , 0.  , 0.  , 0.06, 0.79, 0.14, 0.  , 0.  , 0.  ],
+              [0.  , 0.  , 0.  , 0.  , 0.07, 0.87, 0.06, 0.  , 0.  ],
+              [0.  , 0.  , 0.  , 0.  , 0.  , 0.37, 0.61, 0.02, 0.  ],
+              [0.  , 0.  , 0.  , 0.  , 0.  , 0.03, 0.45, 0.52, 0.  ],
+              [0.  , 0.  , 0.  , 0.  , 0.  , 0.  , 1.  , 0.  , 0.  ]])
+
+# Number of Monte Carlo steps
+num_steps = 100000
+
+# Perform the Monte Carlo simulation
+states_history = monte_carlo_simulation(macierz_przejscia_normalized, num_steps)
+
+# Plot the states over time
+plt.plot(states_history)
+plt.title("Monte Carlo Simulation - State Transitions")
+plt.xlabel("Time Steps")
+plt.ylabel("State")
+plt.show()
 
 
 
