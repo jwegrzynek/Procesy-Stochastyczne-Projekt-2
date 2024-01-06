@@ -1,101 +1,175 @@
 import numpy as np
 import pandas as pd
-import random
-import os
 import matplotlib.pyplot as plt
-from arch.unitroot import ADF
-from statsmodels.sandbox.stats.runs import runstest_1samp
-import statsmodels.tsa.stattools as ts
-from itertools import islice, product
+import networkx as nx
+import random
+from itertools import islice
 
 
-def read_file(data_dir, file_name):
-    df = pd.read_csv(os.path.join(data_dir, file_name), sep='\t', names=['RR Interval', 'Index'])
-    all_indexes = np.arange(df['Index'][0], df['Index'][len(df['Index']) - 1] + 1)
-    missing_indexes = np.setdiff1d(all_indexes, df['Index'])
-    missing_indexes_df = pd.DataFrame({'Index': missing_indexes})
-    df = pd.concat([df, missing_indexes_df], ignore_index=True)
-    df = df.sort_values(by='Index')
-    # df['RR Interval'].interpolate(method="linear", inplace=True)
+def remove_zero_rows_and_columns(matrix):
 
-    return df
+    """
+    Function that removes from matrix row made of zeros and corresponding column
+    
+    Parameters:
+        - matrix - list of lists
+    Returns:
+        - reduced_matrix - matrix with removed rows and columns made of zeros
+        - non_zero_rows_and_columns - list of binary values. True corresponds 
+                                      to an index where the row and column was 
+                                      non-empty, False corresponds to a row and 
+                                      column consisting of zeros
+    """
+
+    non_zero_rows = np.any(matrix != 0, axis=1)
+    non_zero_columns = np.any(matrix != 0, axis=0)
+    non_zero_rows_and_columns = np.logical_or(non_zero_rows, non_zero_columns)
+    reduced_matrix = matrix[non_zero_rows_and_columns][:, non_zero_rows_and_columns]
+    
+    return reduced_matrix, non_zero_rows_and_columns
 
 
-def flatten(x):
-    if isinstance(x, list):
-        return [a for i in x for a in flatten(i)]
+def return_states_names(bins, k):
+    
+    """
+    Function that returns a dictionary with descriptions of states that looks 
+    like this {state number: description, ...}
+    e.g. {0: "608-616",
+          1: "624-632"}
+    
+    Parameters:
+        - bins - a list with interval boundaries that are used to divide into classes
+        - k
+    """
+    
+    if k == 1:
+        states_dict = {i: f'{num}' for i, num in enumerate(bins[:-1])}
     else:
-        return [x]
+        states_dict = {i: f'{num}-{bins[i+1]-8}' for i, num in enumerate(bins[:-1])}
+    return states_dict
 
 
-def list_to_one_value(x):
-    if isinstance(x[0], float) or isinstance(x[0], int):
-        return round(np.mean(x), 2)
-    elif x[0] == 'nielosowy' or x[0] == 'losowy':
-        return round(x.count('losowy') / len(x), 2)
-    elif x[0] == 'niestacjonarny' or x[0] == 'stacjonarny':
-        return round(x.count('niestacjonarny') / len(x), 2)
+def return_bins(rr_intervals, k):
+    
+    """
+    Function that returns a list with interval boundaries that are used to divide into classes
+    
+    Parameters:
+        - rr_intervals - list of RR Intervals
+        - k - (int) - k*8ms
+    """
+    
+    bins = [i for i in range(min(rr_intervals), max(rr_intervals)+(8*k+1), k*8)]
+    return bins
 
 
-def merge_files(file_paths, columns):
-    merged_df = pd.DataFrame()
-
-    for file_path in file_paths:
-        df = pd.read_csv(file_path, sep='\t', usecols=columns)
-        merged_df = pd.concat([merged_df, df]).groupby(level=0).agg(lambda x: x.tolist())
-
-    merged_df = merged_df.applymap(lambda x: flatten(x))
-    merged_df = merged_df.applymap(lambda x: list_to_one_value(x))
-
-    return merged_df
-
-
-def interpret_WW(pvalue):
-    if pvalue < 0.05:
-        return "nielosowy"
-    else:
-        return "losowy"
-
-
-def interpret_ADF(pvalue):
-    if pvalue < 0.05:
-        return "stacjonarny"
-    else:
-        return "niestacjonarny"
+def convert_to_categorical(rr_intervals, k):
+    """
+    Function that converts RR Intervals to categorical variables depending on bins.
+    For example if k=1 [600, 608, 616] -> [0, 1, 2]
+                if k=2 [600, 608, 616] -> [0, 0, 1]
+                if k=3 [600, 608, 616] -> [0, 0, 0]
+                
+    Parameters:
+        - rr_intervals - list of RR Intervals
+        - k - (int) - k*8ms
+    Returns:
+        - list of converted values
+        - dictionary with descriptions of states
+    """
+    
+    bins = [i for i in range(min(rr_intervals), max(rr_intervals)+(8*k+1), k*8)]
+    numerical_series = pd.Series(rr_intervals)
+    categorical_series = pd.cut(numerical_series, bins=bins, labels=False, right=False)
+    categorical_list = categorical_series.tolist()
+    states = return_states_names(bins, k)
+    
+    return categorical_list, states
 
 
-def chunk_list(lst, n):
-    it = iter(lst)
-    return iter(lambda: tuple(islice(it, n)), ())
+def create_transition_matrix(rr_intervals, k):
+    
+    """
+    Function that converts RR Intervals into transition matrix
+    
+    Parameters:
+        - rr_intervals - list of RR Intervals
+        - k - (int) - k*8ms
+    Returns:
+        - transition matrix
+        - dictionary with descriptions of states
+    """
+    
+    list_of_states, states = convert_to_categorical(rr_intervals, k)
+
+    n = max(list_of_states) + 1
+    count_matrix = np.zeros((n, n), dtype=int)
+    for i in range(len(list_of_states)-1):
+        current_state = list_of_states[i]
+        next_state = list_of_states[i + 1]
+        count_matrix[current_state, next_state] += 1
+
+    transition_matrix = count_matrix / count_matrix.sum(axis=1, keepdims=True)
+    transition_matrix = np.nan_to_num(transition_matrix, nan=0)
+    
+    transition_matrix, removed_indexes = remove_zero_rows_and_columns(transition_matrix)
+    
+    if sum(removed_indexes) != len(removed_indexes):
+        states = {key: value for key, value in states.items() if removed_indexes[key]}
+        states = {i: f'{item[1]}' for i, item in enumerate(states.items())}
+
+    return transition_matrix, states
 
 
-def statistics(data):
-    data = data.dropna()
-    WW_pvalue = runstest_1samp(data, cutoff="median")[1]
-    ADF_pvalue = ts.adfuller(data)[1]
-    stats = [
-        round(np.mean(data), 2),
-        round(np.std(data), 2),
-        round(np.min(data), 2),
-        round(np.max(data), 2),
-        round(WW_pvalue, 2),
-        interpret_WW(WW_pvalue),
-        round(ADF_pvalue, 2),
-        interpret_ADF(ADF_pvalue)
-    ]
-    return stats
+def create_transition_matrix_from_events(list_of_states, events):
+    
+    """
+    Function that converts list of events that occur in RR Intervals e.g. into transition matrix
+    
+    Parameters:
+        - list_of_states - list that takes list of strings
+    Returns:
+        - transition matrix
+    """
+
+    n = len(events)
+    count_matrix = np.zeros((n, n), dtype=int)
+    for i in range(len(list_of_states) - 1):
+        current_state_index = events.index(list_of_states[i])
+        next_state_index = events.index(list_of_states[i + 1])
+        count_matrix[current_state_index, next_state_index] += 1
+
+    transition_matrix = count_matrix / count_matrix.sum(axis=1, keepdims=True)
+    transition_matrix = np.nan_to_num(transition_matrix, nan=0)
+    
+    transition_matrix, removed_indexes = remove_zero_rows_and_columns(transition_matrix)
+    
+    states = {i: f'{item}' for i, item in enumerate(events)}
+    
+    if sum(removed_indexes) != len(removed_indexes):
+        states = {key: value for key, value in states.items() if removed_indexes[key]}
+        states = {i: f'{item[1]}' for i, item in enumerate(states.items())}
+    
+    return transition_matrix, states
 
 
-def generate_random_color():
-    color = "#{:02x}{:02x}{:02x}".format(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-    return color
+###############################################################################
 
+def rr_to_events(rr_intervals, lag):
+    
+    """
+    Function that converts RR Intervals into series symbolization
+    
+    Parameters:
+        - rr_intervals - list of RR Intervals
+    Returns:
+        - list that represents series symbolization e.g. ['a', 'd', 'z', 'a']
+    """
+    
+    delta_rr = rr_intervals.diff(lag).dropna()
+    series_symbolization = list(np.zeros(len(delta_rr), dtype=object))
 
-def rr_intervals_events(RR_intervals):
-    delta_RR = RR_intervals.diff().dropna()
-    series_symbolization = list(np.zeros(len(delta_RR), dtype=object))
-
-    for i, diff in enumerate(delta_RR):
+    for i, diff in enumerate(delta_rr):
         if 0 < diff < 40:
             series_symbolization[i] = "d"
         elif -40 < diff < 0:
@@ -106,110 +180,153 @@ def rr_intervals_events(RR_intervals):
             series_symbolization[i] = "A"
         else:
             series_symbolization[i] = "z"
-
-    pairs_in_series_symbolization = [series_symbolization[i] + series_symbolization[i + 1] for i in
-                                     range(len(series_symbolization) - 1)]
-    tripples_in_series_symbolization = [
-        series_symbolization[i] + series_symbolization[i + 1] + series_symbolization[i + 2] for i in
-        range(len(series_symbolization) - 2)]
-
-    single_events = ["z", "a", "A", "d", "D"]
-    double_events = ["".join(pair) for pair in product(single_events, repeat=2)]
-    tripple_events = ["".join(pair) for pair in product(single_events, repeat=3)]
-
-    single_events_occurrences = [series_symbolization.count(event) for event in single_events]
-    double_events_occurrences = [pairs_in_series_symbolization.count(event) for event in double_events]
-    tripple_events_occurrences = [tripples_in_series_symbolization.count(event) for event in tripple_events]
-
-    return single_events, single_events_occurrences, double_events, double_events_occurrences, tripple_events, tripple_events_occurrences
+            
+    return series_symbolization
 
 
-def windows_statistics(RR_intervals, window_size):
-    chunks = [batch for batch in list(chunk_list(RR_intervals.dropna(), window_size)) if len(batch) == window_size]
-
-    WW_results = []
-    ADF_results = []
-
-    for chunk in chunks:
-        chunk_ts = pd.Series(chunk)
-        max_lags = int(np.sqrt(chunk_ts.shape[0]))
-        ADF_pvalue = ADF(chunk_ts, trend="c", max_lags=max_lags).pvalue
-        ADF_results.append(interpret_ADF(ADF_pvalue))
-        WW_pvalue = runstest_1samp(chunk_ts.dropna(), cutoff="median")[1]
-        WW_results.append(interpret_WW(WW_pvalue))
-
-    means_of_windows = np.array([np.mean(chunk) for chunk in chunks])
-
-    mean_RR = np.nanmean(means_of_windows)
-    min_RR = np.nanmin(means_of_windows)
-    max_RR = np.nanmax(means_of_windows)
-    var_RR = np.nanstd(means_of_windows)
-    random_sequences = WW_results.count("losowy") / len(WW_results)
-    nonstationary_serieses = ADF_results.count("niestacjonarny") / len(ADF_results)
-    stats = [
-        window_size,
-        round(mean_RR, 2),
-        round(var_RR, 2),
-        round(min_RR, 2),
-        round(max_RR, 2),
-        round(random_sequences, 2),
-        round(nonstationary_serieses, 2)
-    ]
-
-    return stats
+def chunk_list(flattened_list, chunk_size):
+    iterator = iter(flattened_list)
+    chunked_list = iter(lambda: tuple(islice(iterator, chunk_size)), ())
+    chunked_list = filter(lambda x: len(x) == chunk_size, chunked_list)
+    return chunked_list
 
 
-def plot(x, y, file_name, dir_name, title, xlabel=None, ylabel=None):
-    fig, ax = plt.subplots()
-    fig.set_size_inches(30, 7)
-    ax.plot(x, y)
-    ax.set_title('{} - {}'.format(title, file_name))
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    path = os.path.join(dir_name, file_name, "plots", '{} - {}.png'.format(title, file_name))
+def classify_states(transition_matrix):
+    num_states = len(transition_matrix)
+    communication_classes = []
+
+    visited = np.zeros(num_states, dtype=bool)
+
+    def dfs(current_state, communication_class):
+        visited[current_state] = True
+        communication_class.add(current_state)
+
+        for next_state_prob in transition_matrix[current_state]:
+            next_state = np.argmax(next_state_prob)
+            if not visited[next_state]:
+                dfs(next_state, communication_class)
+
+    for state in range(num_states):
+        if not visited[state]:
+            communication_class = set()
+            dfs(state, communication_class)
+            communication_classes.append(communication_class)
+
+    state_classifications = []
+
+    for communication_class in communication_classes:
+        if any(transition_matrix[state][state] > 0 for state in communication_class):
+            state_classifications.append("Recurrent")
+        else:
+            state_classifications.append("Transient")
+
+    return state_classifications
+
+
+def find_stationary_distribution_eigen(P):
+    # Obliczamy wartości własne i wektory własne
+    eigenvalues, eigenvectors = np.linalg.eig(P.T)
+    
+    # Znajdujemy indeksy wartości własnych bliskich 1
+    stationary_indices = np.where(np.isclose(eigenvalues, 1))[0]
+    
+    # Wybieramy odpowiadające wektory własne
+    stationary_vectors = eigenvectors[:, stationary_indices]
+    
+    # Normalizujemy, aby suma elementów była równa 1
+    stationary_distribution = stationary_vectors[:, 0] / np.sum(stationary_vectors[:, 0])
+    stationary_distribution = np.real_if_close(stationary_distribution)
+    
+    return stationary_distribution
+
+
+def find_stationary_distribution_eigen_other(P):
+    eigenvalues, eigenvectors = np.linalg.eig(P.T)
+    stationary_indices = eigenvalues.argmax()
+    stationary_distribution = (eigenvectors[:,stationary_indices]/eigenvectors.sum())
+    stationary_distribution = np.real_if_close(stationary_distribution)
+    return stationary_distribution
+
+
+def find_stationary_distribution_monte_carlo(P, num_steps=10000):
+    num_states = P.shape[0]
+    current_state = np.random.choice(num_states)  # Inicjalizacja losowym stanem
+
+    state_counts = np.zeros(num_states)
+
+    for _ in range(num_steps):
+        state_counts[current_state] += 1
+        try:
+            next_state = np.random.choice(num_states, p=P[current_state])
+        except ValueError:
+            random_index = random.randint(0, len(P[current_state]) - 1)
+            P[current_state][random_index] = 1
+            next_state = np.random.choice(num_states, p=P[current_state])
+        
+        current_state = next_state
+
+    stationary_distribution = state_counts / num_steps
+    return stationary_distribution
+
+
+def find_stationary_distribution_limit(P):
+    
+    p_n = np.round(np.linalg.matrix_power(P, 100), 3)
+    stationary_distribution = p_n[0]
+    
+    return stationary_distribution
+
+
+def check_reversibility(P, stationary_distribution):
+    num_states = P.shape[0]
+
+    for i in range(num_states):
+        for j in range(num_states):
+            left_side = stationary_distribution[i] * P[i, j]
+            right_side = stationary_distribution[j] * P[j, i]
+
+            if not np.isclose(left_side, right_side):
+                return "Chain is NOT reversible"
+
+    return "Chain is reversible"
+
+
+def create_graph(transition_matrix, labels, title, path):
+    options = {'node_color': 'skyblue',
+               'node_size': 5000,
+               'width': 1,
+               'arrowstyle': '->',
+               'arrowsize': 20
+               }
+    plt.rcParams["figure.figsize"] = (20, 15)
+    plt.figure()
+    graph = nx.DiGraph(transition_matrix)
+    nx.draw_networkx(graph, arrows=True, labels=labels, **options)
+    plt.title(title, fontsize=35)
     plt.savefig(path)
+    
+
+def save_matrix(transition_matrix, states, patients_dir, patient_name, subsection, file_name):
+    matrix = np.round(transition_matrix, 2)
+    row_column_names = states
+    index = [row_column_names[i] for i in range(matrix.shape[0])]
+    columns = [row_column_names[i] for i in range(matrix.shape[1])]
+    df_matrix = pd.DataFrame(matrix, index=index, columns=columns)
+    path = f'{patients_dir}/{patient_name}/{subsection}/transition_matrices/{file_name}'
+    df_matrix.to_csv(path, sep='\t')
 
 
-def hist(x, file_name, dir_name, title, xlabel=None, ylabel=None):
-    fig, ax = plt.subplots()
-    fig.set_size_inches(10, 7)
-    ax.hist(x)
-    ax.set_title('{} - {}'.format(title, file_name))
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    path = os.path.join(dir_name, file_name, "plots", '{} - {}.png'.format(title, file_name))
-    plt.savefig(path)
-
-
-def bar_plot(x, y, file_name, dir_name, events, length=8, hight=6, n=5, d=False):
-    sorted_data = sorted(zip(x, y), key=lambda x: x[1], reverse=True)
-    top_x, top_y = zip(*sorted_data[:n])
-    fig, ax = plt.subplots(figsize=(length, hight))
-    ax.bar(top_x, top_y)
-    ax.set_xlabel('Events')
-    ax.set_ylabel('Numbers of Events')
-    ax.set_title('Bar Plot of Top {} {} Events - {}'.format(n, events, file_name))
-    if d is False:
-        path = os.path.join(dir_name, file_name, "plots", '{} - {}.png'.format(events, file_name))
-        plt.savefig(path)
-    else:
-        path = os.path.join(dir_name, 'Group Statistics', 'D_{}_{}.png'.format(file_name, events))
-        plt.savefig(path)
-
-
-def stacked_plot(data, file_name, dir_name):
-    fig, axes = plt.subplots(nrows=20, ncols=1, figsize=(8, 20), sharex=True)
-    for i, ax in enumerate(axes, start=1):
-        ax.plot(data.diff(i).dropna())
-    fig.suptitle('k-Differenced Times Series - {}'.format(file_name), fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(os.path.join(dir_name, file_name, "plots", 'Diffed Time Series - {}.png'.format(file_name)))
-
-
-def stacked_hist(data, file_name, dir_name):
-    fig, axes = plt.subplots(nrows=20, ncols=1, figsize=(5, 20), sharex=True)
-    for i, ax in enumerate(axes, start=1):
-        ax.hist(data.diff(i).dropna())
-    fig.suptitle('Hist of k-Differenced TS - {}'.format(file_name), fontsize=16)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(os.path.join(dir_name, file_name, "plots", 'Hist of Diffed RR - {}.png'.format(file_name)))
+def write_file(iterable, states, k, path, description="k"):
+    with open(path, 'a') as file:
+        file.write(f'---------{description} = {k}---------\n')
+        for i, item in enumerate(iterable):
+            file.write(f'{i}\tState {states[i]} -> {item}\n')
+        file.write('\n')
+        file.close()
+        
+def write_reversibility_file(is_reversible, k, path, description="k"):
+    with open(path, 'a') as file:
+        file.write(f'---------{description} = {k}---------\n')
+        file.write(is_reversible+'\n')
+        file.write('\n')
+        file.close()
